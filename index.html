@@ -486,5 +486,35 @@ $('#bi').onkeydown=e=>{if(e.key!='Enter')return;const q=e.target.value.trim();if
 function chips(){let c=$('#chips');if(!c){c=document.createElement('div');c.id='chips';c.style.cssText='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px';$('#bi').before(c)}const q=['Take me to Live Traffic','Take me to Incidents','Take me to Analytics','Take me to Notifications','Show my profile','Which road is worst now?'];if(ADM())q.splice(4,0,'Take me to Vehicle Journey');c.innerHTML=q.map(t=>`<button class="btn o" style="padding:3px 9px;font-size:.72rem" data-bq="${t}">${t}</button>`).join('');c.querySelectorAll('[data-bq]').forEach(b=>b.onclick=()=>botAsk(b.dataset.bq))}
 $('#fab').onclick=()=>{$('#bot').classList.toggle('on');if(!$('#msgs').children.length)say('Hi! Ask about traffic, or tell me where to go - e.g. "take me to analytics".');chips()};
 
+/* ===== DEMO MODE: login bypassed for presentation/demo ===== */
+(function(){
+  const demoEnter=()=>{
+    let u=USR.find(x=>x.e==='demo@traqnet.demo');
+    if(!u){u={n:'Demo Admin',e:'demo@traqnet.demo',m:'',h:'demo',r:'admin'};USR.push(u);LS('tn_users',USR)}
+    ME=u;LS('tn_sess',u.e);hideLanding();$('#auth').style.display='none';
+    $('#av').textContent='DA';$('#role').textContent='Administrator';go('dash');
+  };
+  const oldWL=wireLanding;
+  wireLanding=function(){
+    oldWL();
+    const sign=$('#lpSignin'),admin=$('#lpAdmin');
+    if(sign)sign.style.display='none';
+    if(admin)admin.style.display='none';
+    const ex=$('#lpExplore'),ex2=$('#lpExplore2');
+    if(ex)ex.onclick=demoEnter;
+    if(ex2)ex2.onclick=demoEnter;
+  };
+  const oldAuthUI=authUI;
+  authUI=function(){demoEnter()};
+  const oldSet=V.set;
+  V.set=function(){
+    const html=oldSet();
+    return html.replace(
+      'The current version is a frontend-only prototype powered by simulated data, with plans to integrate a Java backend in a future release.',
+      'The current version is a frontend-only prototype powered by simulated data, with plans to integrate a Java backend in a future release.<br><b style="display:block;margin-top:8px">Login credentials are temporarily removed for demo purposes.</b>'
+    );
+  };
+})();
+
 theme();bellUp();init();
 </script></body></html>
