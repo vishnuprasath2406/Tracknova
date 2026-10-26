@@ -517,4 +517,142 @@ $('#fab').onclick=()=>{$('#bot').classList.toggle('on');if(!$('#msgs').children.
 })();
 
 theme();bellUp();init();
+</script>
+<script>
+/* ===== TrackNova v4: Rain Watch - rainfall detection, rain-related accidents, rain-safe routing ===== */
+(()=>{
+const ids=Object.keys(N),HEAVY=7.5;
+const RK={mode:'demo',live:null,liveAt:0,nr:{},er:[],al:{},acc:0,lastAcc:0,
+ cells:[{la:12.99,lo:80.22,r:.026,p:22,dx:.0006,dy:.0004,ph:0},{la:13.085,lo:80.20,r:.025,p:11,dx:.0004,dy:-.0003,ph:2},{la:13.05,lo:80.285,r:.025,p:5,dx:-.0003,dy:.0002,ph:4}],t:0};
+/* [upper bound mm/h, label, colour, speed factor] */
+const LV=[[.5,'Dry','#8fa1ac',1],[2.5,'Light','#5aa9e6',.92],[7.5,'Moderate','#2f7fd1',.8],[20,'Heavy','#6a3fd0',.6],[1e9,'Very heavy','#c0268f',.4]];
+const lv=r=>LV.find(x=>r<x[0]),rf=r=>lv(r)[3],eR=i=>RK.er[i]||0;
+const chip=(t,c)=>`<span class="ch" style="background:${c}22;color:${c}">${t}</span>`;
+
+function rainAt(la,lo){
+ if(RK.mode=='live'){let s=0,w=0;ids.forEach(id=>{const d=(la-N[id][1])**2+(lo-N[id][2])**2+1e-6,k=1/d;s+=k*(RK.nr[id]||0);w+=k});return s/w}
+ return Math.max(0,...RK.cells.map(c=>{const d=(la-c.la)**2+(lo-c.lo)**2;return c.p*(.7+.3*Math.sin(RK.t/8+c.ph))*Math.exp(-d/(c.r*c.r))}))}
+function compute(){
+ RK.t++;
+ if(RK.mode=='demo')RK.cells.forEach(c=>{c.la+=c.dy;c.lo+=c.dx;if(c.la<12.95||c.la>13.15)c.dy*=-1;if(c.lo<80.14||c.lo>80.32)c.dx*=-1});
+ ids.forEach(id=>{RK.nr[id]=RK.mode=='live'?((RK.live&&RK.live[id])||0):rainAt(N[id][1],N[id][2])});
+ RK.er=E.map(e=>{const a=N[e.a],b=N[e.b];return Math.max(RK.nr[e.a],RK.nr[e.b],rainAt((a[1]+b[1])/2,(a[2]+b[2])/2))})}
+async function fetchLive(){
+ try{const la=ids.map(i=>N[i][1]).join(','),lo=ids.map(i=>N[i][2]).join(',');
+  const r=await fetch('https://api.open-meteo.com/v1/forecast?latitude='+la+'&longitude='+lo+'&current=precipitation&timezone=auto');
+  if(!r.ok)return 0;const j=await r.json(),a=Array.isArray(j)?j:[j];RK.live={};
+  ids.forEach((id,k)=>{RK.live[id]=Math.max(0,+((a[k]&&a[k].current&&a[k].current.precipitation)||0))});RK.liveAt=Date.now();return 1}catch(e){return 0}}
+async function setMode(m){
+ if(m=='live'){toast('Fetching live rainfall...');if(await fetchLive())RK.mode='live';else{toast('Live weather unavailable - showing the demo storm');RK.mode='demo'}}else RK.mode='demo';
+ compute();if(cur=='rain')go('rain')}
+
+/* ---- seed data: two earlier rain-related accidents + a heads-up notification ---- */
+[['Anna Salai, near Saidapet','Two-wheeler skidded on the wet road; rider treated at the scene.','Medium','Resolved','06:48'],
+ ['Velachery Main Rd','Low visibility and waterlogging caused a rear-end collision.','High','Investigating','09:05']]
+ .forEach(s=>INC.push({id:INC[INC.length-1].id+1,t:'Accident',l:s[0],d:'\uD83C\uDF27 Rain-related: '+s[1],sv:s[2],s:s[3],tm:s[4],rn:1}));
+const rainInc=()=>INC.filter(i=>i.rn);
+compute();E.forEach((e,i)=>{if(eR(i)>=HEAVY)RK.al[i]=1});
+NT.unshift({k:'w',t:'Heavy rainfall alert',m:'Heavy rain detected around Guindy and Velachery. Rain-safe routing is active in Route Planner.',ts:Date.now()-2*6e4,u:1});
+
+/* ---- nav / labels ---- */
+T.en.rain='Rain Watch';T.hi.rain='\u092C\u093E\u0930\u093F\u0936 \u0928\u093F\u0917\u0930\u093E\u0928\u0940';T.bn.rain='\u09AC\u09C3\u09B7\u09CD\u099F\u09BF \u09AA\u09B0\u09CD\u09AF\u09AC\u09C7\u0995\u09CD\u09B7\u09A3';T.ta.rain='\u0BAE\u0BB4\u0BC8 \u0B95\u0BA3\u0BCD\u0B95\u0BA3\u0BBF\u0BAA\u0BCD\u0BAA\u0BC1';
+IC.rain='\uD83C\uDF27';ORD.splice(2,0,'rain');
+
+/* ---- map overlay (Leaflet) ---- */
+function attach(mv){if(!mv||!mv.map||!window.L)return;mv._rl=L.layerGroup().addTo(mv.map);paint(mv)}
+function paint(mv){
+ if(!mv||!mv._rl)return;const g=mv._rl;g.clearLayers();
+ if(RK.mode=='demo')RK.cells.forEach(c=>L.circle([c.la,c.lo],{radius:c.r*111000,color:'#2f7fd1',weight:1,dashArray:'4 6',fillColor:'#2f7fd1',fillOpacity:.07,interactive:false}).addTo(g));
+ ids.forEach(id=>{const r=RK.nr[id];if(r<.5)return;const l=lv(r);
+  L.circle([N[id][1],N[id][2]],{radius:500+r*110,color:l[2],weight:1.5,fillColor:l[2],fillOpacity:.32}).bindTooltip(N[id][0]+': '+r.toFixed(1)+' mm/h - '+l[1]+' rain').addTo(g)});
+ E.forEach((e,i)=>{const r=eR(i);if(r<HEAVY)return;
+  L.polyline([[N[e.a][1],N[e.a][2]],[N[e.b][1],N[e.b][2]]],{color:lv(r)[2],weight:11,opacity:.5,dashArray:'1 9',lineCap:'round'}).bindTooltip(e.n+' - avoid: '+r.toFixed(1)+' mm/h').addTo(g)})}
+
+/* ---- Rain Watch view ---- */
+const rk=()=>{const nr=ids.filter(id=>RK.nr[id]>=.5).length,hv=E.filter((e,i)=>eR(i)>=HEAVY).length,mx=Math.max(...ids.map(id=>RK.nr[id]));
+ return kpi('Junctions with rain',nr+' / '+ids.length,RK.mode=='demo'?'simulated storm':'live readings')+kpi('Peak intensity',mx.toFixed(1)+' mm/h',lv(mx)[1])+kpi('Heavy-rain roads',hv,hv?'avoid if possible':'none right now')+kpi('Rain-related accidents',rainInc().length,'reported today')+kpi('Rain-safe routing','Active','avoids \u2265 '+HEAVY+' mm/h')};
+const accList=()=>{const a=rainInc().slice().reverse().slice(0,6);return a.length?a.map(i=>`<div class="row" style="display:block"><div style="display:flex;justify-content:space-between;gap:8px"><b>${i.l}</b><span class="ch ${i.sv}">${i.sv}</span></div><div class="mut">${i.d} \u00B7 ${i.tm} \u00B7 ${i.s}</div></div>`).join(''):'<p class="mut">No rain-related accidents reported.</p>'};
+const avoidList=()=>{const a=E.map((e,i)=>[e,eR(i)]).filter(x=>x[1]>=2.5).sort((x,y)=>y[1]-x[1]).slice(0,6);
+ return a.length?a.map(([e,r])=>`<div class="row"><span><b>${e.n}</b><div class="mut">${N[e.a][0]} \u2194 ${N[e.b][0]}</div></span><span style="text-align:right">${chip(lv(r)[1],lv(r)[2])}<div class="mut">${r.toFixed(1)} mm/h \u00B7 ~${Math.round(spd(e)*rf(r))} km/h</div></span></div>`).join(''):'<p class="mut">No roads with moderate or heavy rain right now.</p>'};
+const juncList=()=>'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:2px 22px">'+ids.slice().sort((a,b)=>RK.nr[b]-RK.nr[a]).map(id=>{const r=RK.nr[id],l=lv(r);return`<div class="row" style="display:block"><div style="display:flex;justify-content:space-between"><span>${N[id][0]} <span class="mut">${N[id][3]}</span></span><b>${r.toFixed(1)}</b></div><div class="bar"><i style="width:${Math.min(100,r/30*100)}%;background:${l[2]}"></i></div></div>`}).join('')+'</div>';
+const src=()=>RK.mode=='demo'?'Simulated storm for demonstration - junction readings are generated, not measured. Switch to Live weather for real rainfall (Open-Meteo, no API key).':'Live precipitation from Open-Meteo, updated '+new Date(RK.liveAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})+'. Values are mm in the latest interval.';
+V.rain=()=>`<div class="kp" id="rk">${rk()}</div><div class="g2"><div class="card"><div class="row" style="border:0;padding:0 0 10px;flex-wrap:wrap"><h3 style="margin:0">Rainfall detected across Chennai</h3><div class="sg" style="width:min(300px,100%)"><button data-rm="demo" class="${RK.mode=='demo'?'on':''}">Demo storm</button><button data-rm="live" class="${RK.mode=='live'?'on':''}">Live weather</button></div></div><div class="mw big"><canvas id="rm"></canvas></div><div class="lg">${LV.slice(1).map(l=>`<span><i style="background:${l[2]}"></i>${l[1]}</span>`).join('')}<span>Dotted road = avoid</span></div><p class="mut" id="rsrc" style="margin:8px 0 0">${src()}</p></div><div><div class="card" style="margin-bottom:14px"><h3>Rain-related accidents</h3><div id="ra">${accList()}</div></div><div class="card"><h3>Roads to avoid</h3><div id="rv">${avoidList()}</div><button class="btn" id="rgo" style="margin-top:10px">Plan a rain-safe route</button></div></div></div><div class="card" style="margin-top:14px"><h3>Rainfall by junction (mm/h)</h3><div id="rj">${juncList()}</div></div>`;
+I.rain=()=>{MV=MapV($('#rm'),{big:1});attach(MV);
+ document.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>setMode(b.dataset.rm));$('#rgo').onclick=()=>go('route')};
+function fill(){if(!$('#rk'))return;$('#rk').innerHTML=rk();$('#ra').innerHTML=accList();$('#rv').innerHTML=avoidList();$('#rj').innerHTML=juncList();$('#rsrc').textContent=src();paint(MV)}
+
+/* ---- dashboard banner ---- */
+function banner(){
+ const hv=E.map((e,i)=>[e,eR(i)]).filter(x=>x[1]>=HEAVY).sort((a,b)=>b[1]-a[1]),n=rainInc().length;
+ if(!hv.length)return'';
+ return`<div class="card ic" id="rbn" style="margin-bottom:14px;border-color:#6a3fd0;display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:space-between"><div><b>\uD83C\uDF27 Heavy rainfall detected</b> on ${hv.slice(0,3).map(x=>x[0].n).join(', ')}${hv.length>3?' +'+(hv.length-3)+' more':''}. ${n} rain-related accident${n==1?'':'s'} reported today.</div><button class="btn" id="rbg">Open Rain Watch</button></div>`}
+function bn(){const b=$('#rb');if(!b)return;b.innerHTML=banner();const c=$('#rbn');if(c)c.onclick=()=>go('rain')}
+const oD=V.dash;V.dash=()=>`<div id="rb">${banner()}</div>`+oD();
+const oId=I.dash;I.dash=()=>{oId();bn()};
+
+/* ---- rain-aware route planner ---- */
+function rdij(a,b,avoid){
+ const run=skip=>{const D={},pv={},q=new Set(ids);q.forEach(n=>D[n]=1e9);D[a]=0;
+  while(q.size){let u=null;q.forEach(n=>{if(u==null||D[n]<D[u])u=n});if(D[u]>=1e9)break;q.delete(u);if(u==b)break;
+   E.forEach((e,i)=>{const v=e.a==u?e.b:e.b==u?e.a:null;if(!v||!q.has(v))return;const r=eR(i);if(skip&&r>=HEAVY)return;
+    const w=e.d/(spd(e)*rf(r))*(avoid&&r>=HEAVY?3:1);if(D[u]+w<D[v]){D[v]=D[u]+w;pv[v]=[u,i]}})}
+  if(D[b]>=1e9)return null;const es=[];let c=b;while(c!=a){const[p,i]=pv[c];es.unshift(i);c=p}return es};
+ return avoid?(run(1)||run(0)):run(0)}
+const mt=es=>{let km=0,mn=0,mr=0,c=0;const hv=[];es.forEach(j=>{const e=E[j],r=eR(j);km+=e.d;mn+=e.d/(spd(e)*rf(r))*60;mr=Math.max(mr,r);c+=e.c;if(r>=HEAVY)hv.push(e.n)});return{km,mn,mr,c:c/es.length,hv}};
+window.calc=function(){
+ const a=$('#fa').value,b=$('#fb').value,rr=$('#rr');
+ if(a==b){rr.innerHTML='<div class="card mut">Choose two different places.</div>';MV.S.route=null;MV.draw();return}
+ const seen={};RS=[];
+ [['Fastest',rdij(a,b,0)],['Shortest',dij(a,b,0)],['Least congested',dij(a,b,2)],['Rain-safe',rdij(a,b,1)]].forEach(([l,es])=>{
+  if(!es||!es.length)return;const k=es.join();if(seen[k])return;const r=Object.assign({l,es},mt(es));seen[k]=r;RS.push(r)});
+ RSel=Math.min(RSel,RS.length-1);showR()};
+window.showR=function(){
+ const f=RS.find(r=>r.l=='Fastest')||RS[0],sf=RS.find(r=>r.l=='Rain-safe');let adv;
+ if(f.mr>=HEAVY){
+  adv=sf&&sf.mr<HEAVY
+   ?`<div class="card" style="margin-bottom:10px;border-color:#6a3fd0"><b>\u26A0 Heavy rain on the fastest route</b><div class="mut">${f.hv.join(', ')} ${f.hv.length>1?'are':'is'} getting ${f.mr.toFixed(1)} mm/h. The Rain-safe route avoids it${Math.round(sf.mn-f.mn)>0?' for about '+Math.round(sf.mn-f.mn)+' extra min':' at almost no extra time'}.</div></div>`
+   :`<div class="card" style="margin-bottom:10px;border-color:#c0268f"><b>\u26A0 Heavy rain on every route</b><div class="mut">No rain-free alternative exists between these places right now. Consider delaying the trip or driving slowly.</div></div>`}
+ else adv=f.mr>=.5?`<div class="card mut" style="margin-bottom:10px">\uD83C\uDF26 ${lv(f.mr)[1]} rain on the fastest route (${f.mr.toFixed(1)} mm/h) - travel times already include the slowdown.</div>`:`<div class="card mut" style="margin-bottom:10px">\u2600 No rain detected on the fastest route.</div>`;
+ const rc=r=>r.mr<.5?chip('No rain','#178a58'):r.mr<HEAVY?chip(lv(r.mr)[1]+' rain \u00B7 '+r.mr.toFixed(1)+' mm/h',lv(r.mr)[2]):chip('Heavy rain: '+r.hv.join(', '),lv(r.mr)[2]);
+ $('#rr').innerHTML=adv+RS.map((r,i)=>`<div class="card ic" data-r="${i}" style="margin-bottom:10px;${i==RSel?'border-color:var(--ac)':''}"><div class="row" style="border:0;padding:0"><b>${r.l=='Rain-safe'?'Rain-safe (avoids heavy rain)':r.l}</b><b>${Math.round(r.mn)} min \u00B7 ${r.km.toFixed(1)} km</b></div><div class="mut" style="margin-top:6px">via ${r.es.map(j=>E[j].n).join(' \u2192 ')}</div><div class="bar"><i style="width:${Math.min(100,r.c)}%;background:${col(r.c)}"></i></div><div style="margin-top:8px">${rc(r)}</div></div>`).join('');
+ document.querySelectorAll('[data-r]').forEach(c=>c.onclick=()=>{RSel=+c.dataset.r;showR()});
+ MV.S.route=RS[RSel].es;MV.S.from=$('#fa').value;MV.draw();paint(MV)};
+const oR=I.route;I.route=()=>{oR();attach(MV)};
+
+/* ---- chatbot ---- */
+if(typeof PG!=='undefined')PG.unshift([/\brain|weather|flood|waterlog/,'rain','Rain Watch']);
+const ob=window.botAsk;
+window.botAsk=function(q){
+ const l=q.toLowerCase();
+ if(/\brain|flood|waterlog|wet road|weather/.test(l)&&!/\b(go|take|open|show|navigate|switch|bring|jump)\b/.test(l)){
+  $('#bi').value='';say(q,1);const hv=E.map((e,i)=>[e,eR(i)]).filter(x=>x[1]>=HEAVY).sort((a,b)=>b[1]-a[1]);
+  return say(hv.length?`Heavy rain on ${hv.slice(0,3).map(x=>x[0].n+' ('+x[1].toFixed(0)+' mm/h)').join(', ')}. ${rainInc().length} rain-related accidents reported today. Use Route Planner and pick "Rain-safe" to avoid the wet roads.`:'No heavy rainfall detected right now.')}
+ return ob(q)};
+
+/* ---- live loop ---- */
+function tick(){
+ compute();
+ if(RK.mode=='live'&&Date.now()-RK.liveAt>6e5)fetchLive();
+ const nw=[];E.forEach((e,i)=>{const r=eR(i);if(r>=HEAVY&&!RK.al[i]){RK.al[i]=1;nw.push(e.n)}else if(r<HEAVY-2)RK.al[i]=0});
+ if(nw.length)notify('w','Heavy rainfall alert','Heavy rain on '+nw.slice(0,2).join(', ')+(nw.length>2?' +'+(nw.length-2)+' more':'')+'. Avoid these roads - a rain-safe route is available.');
+ if(RK.mode=='demo'&&RK.acc<8&&Date.now()-RK.lastAcc>30000&&Math.random()<.35){
+  const hv=E.map((e,i)=>i).filter(i=>eR(i)>=HEAVY);
+  if(hv.length){const i=P(hv),e=E[i],r=eR(i),why=P(['Two-wheeler skidded on the wet road','Low visibility caused a rear-end collision','Waterlogging stalled a vehicle and blocked the lane','Car hydroplaned into the median']);
+   RK.lastAcc=Date.now();RK.acc++;
+   INC.push({id:INC[INC.length-1].id+1,t:'Accident',l:e.n+', near '+N[e.a][0],d:'\uD83C\uDF27 Rain-related: '+why+' ('+r.toFixed(0)+' mm/h).',sv:P(['Medium','Medium','High']),s:'Reported',tm:new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}),rn:1});
+   notify('b','Rain-related accident','\uD83C\uDF27 '+why+' on '+e.n+'. Avoid the area.');
+   if(cur=='inc')go('inc')}}
+ if(cur=='rain')fill();else if(cur=='dash')bn();else if(cur=='route')paint(MV)}
+setInterval(tick,3000);
+window.TN_RAIN=RK;
+bellUp();try{nav()}catch(e){}
+})();
+</script>
+<script>
+/* ===== No login screen: open straight on the dashboard ===== */
+(()=>{
+window.showLanding=function(){authUI()};   /* authUI = demo auto-enter */
+const lo=$('#lo');if(lo)lo.style.display='none';
+if(!ME)authUI();else go(cur||'dash');
+})();
 </script></body></html>
