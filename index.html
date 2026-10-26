@@ -656,11 +656,6 @@ const lo=$('#lo');if(lo)lo.style.display='none';
 if(!ME)authUI();else go(cur||'dash');
 })();
 </script></body></html>
-<!-- ===== TrackNova ANPR patch v2 =====
- 1. DELETE the earlier "TrackNova ANPR patch" block (Tesseract script + style + script).
- 2. Paste this whole file INSIDE <body>, just before the final </body>.
- What it does: reads the real plate from your uploaded video (OCR), draws a GREEN box
- exactly around that plate, and writes the plate number in the label. No random/simulated plates. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
 <style>
 .stage:fullscreen{aspect-ratio:auto;width:100vw;height:100vh;border-radius:0;background:#000}
@@ -669,12 +664,13 @@ if(!ME)authUI();else go(cur||'dash');
 <script>
 (()=>{
 const GREEN='#22c55e';
-const RD={on:0,w:null,busy:0,tracks:[],found:new Set(),pass:0};
+const RD={on:0,w:null,busy:0,tracks:[],found:new Set(),pass:0,gen:0,seek:0,lt:-1};
+const TR={buf:[],cv:null};
 const STATES=new Set('AN AP AR AS BR CG CH DD DL DN GA GJ HP HR JH JK KA KL LA LD MH ML MN MP MZ NL OD OR PB PY RJ SK TN TR TS UK UP WB'.split(' '));
 const L2D={O:'0',Q:'0',D:'0',I:'1',L:'1',Z:'2',S:'5',B:'8',G:'6'},D2L={'0':'O','1':'I','2':'Z','5':'S','8':'B','6':'G'};
-
-/* Indian plate = 2 letters + 2 digits + 1-3 letters + 4 digits (e.g. TN09CL7878).
-   Letter/digit confusions (O/0, I/1, S/5, B/8...) are corrected by position. */
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+ 
+/* ---------- Indian plate format fixer: 2 letters + 2 digits + 1-3 letters + 4 digits ---------- */
 function fix(raw){
  const s=raw.toUpperCase().replace(/[^A-Z0-9]/g,'');let best=null;
  for(let a=0;a+9<=s.length;a++)for(let n=9;n<=11&&a+n<=s.length;n++){
@@ -685,17 +681,16 @@ function fix(raw){
    o+=ch}
   if(ok&&STATES.has(o.slice(0,2))&&(!best||c<best.c))best={p:o,c}}
  return best}
-
+const sim=(a,b)=>{if(!a||!b||a.length!=b.length)return 0;let d=0;for(let i=0;i<a.length;i++)if(a[i]!=b[i])d++;return d<=2};
+ 
+/* ---------- OCR ---------- */
 async function worker(){
  if(RD.w)return RD.w;
  toast('Loading plate reader (first time only)...');
  const w=await Tesseract.createWorker('eng');
  await w.setParameters({tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',tessedit_pageseg_mode:'11'});
  return RD.w=w}
-
 const wordsOf=d=>{if(d.words&&d.words.length)return d.words;const o=[];(d.blocks||[]).forEach(b=>b.paragraphs.forEach(p=>p.lines.forEach(l=>l.words.forEach(w=>o.push(w)))));return o};
-
-/* join neighbouring words on one line ("TN09" "CL" "7878") and test each chain as a plate */
 function candidates(ws){
  ws=ws.filter(w=>w.text&&w.text.trim()&&w.confidence>20).map(w=>({t:w.text,c:w.confidence,...w.bbox}));
  const chains=[];
@@ -706,65 +701,119 @@ function candidates(ws){
  const res=[];
  chains.forEach(ch=>{const f=fix(ch.map(w=>w.t).join(''));if(!f)return;
   const b=[Math.min(...ch.map(w=>w.x0)),Math.min(...ch.map(w=>w.y0)),Math.max(...ch.map(w=>w.x1)),Math.max(...ch.map(w=>w.y1))],r=(b[2]-b[0])/(b[3]-b[1]);
-  if(r<1.8||r>9)return;                       /* must be plate-shaped */
+  if(r<1.8||r>9)return;
   const conf=ch.reduce((s,w)=>s+w.c,0)/ch.length-5*f.c;
   if(conf>=55)res.push({p:f.p,conf:Math.min(99.5,conf),b})});
  return res}
-
-/* scan regions: whole frame first, then 4 overlapping zoomed tiles (finds small plates) */
-function regions(vw,vh){const r=[[0,0,vw,vh]],tw=vw*.58,th=vh*.58;[0,vh-th].forEach(y=>[0,vw-tw].forEach(x=>r.push([x,y,tw,th])));return r}
-
-/* tracks: a plate is shown only after it is seen twice (or once with high confidence) */
-function feed(f){
- const now=Date.now(),cx=(f.b[0]+f.b[2])/2,cy=(f.b[1]+f.b[3])/2,lim=.08*vid.videoWidth;
- let t=RD.tracks.find(t=>t.k[f.p]||Math.hypot(t.cx-cx,t.cy-cy)<lim);
- if(!t)RD.tracks.push(t={k:{},v:{},p:null});
- t.k[f.p]=(t.k[f.p]||0)+1;t.v[f.p]=(t.v[f.p]||0)+f.conf;t.cx=cx;t.cy=cy;t.last=now;
+const regions=(vw,vh)=>{const r=[[0,0,vw,vh]],tw=vw*.58,th=vh*.58;[0,vh-th].forEach(y=>[0,vw-tw].forEach(x=>r.push([x,y,tw,th])));return r};
+ 
+/* ---------- frame grabbing (small grayscale copies used by the tracker) ---------- */
+function grab(v){
+ const vw=v.videoWidth,vh=v.videoHeight,w=Math.round(Math.min(vw,640)),h=Math.round(vh*w/vw),ds=w/vw;
+ const cv=TR.cv||(TR.cv=document.createElement('canvas'));if(cv.width!=w||cv.height!=h){cv.width=w;cv.height=h}
+ const x=cv.getContext('2d',{willReadFrequently:true});x.drawImage(v,0,0,w,h);
+ const d=x.getImageData(0,0,w,h).data,g=new Uint8Array(w*h);
+ for(let i=0,j=0;j<g.length;i+=4,j++)g[j]=(d[i]*77+d[i+1]*150+d[i+2]*29)>>8;
+ return{t:v.currentTime,g,w,h,ds}}
+function pushBuf(fe){const l=TR.buf[TR.buf.length-1];if(l&&Math.abs(l.t-fe.t)<1e-4)return;TR.buf.push(fe);while(TR.buf.length&&TR.buf[0].t<fe.t-3)TR.buf.shift()}
+ 
+/* ---------- template tracker (zero-mean SAD) ---------- */
+function tplOf(fe,x,y,w,h){
+ const z=new Float32Array(w*h);let s=0;
+ for(let j=0;j<h;j++)for(let i=0;i<w;i++){const v=fe.g[(y+j)*fe.w+x+i];z[j*w+i]=v;s+=v}
+ const m=s/(w*h);let c=0;for(let k=0;k<z.length;k++){z[k]-=m;c+=Math.abs(z[k])}
+ return{w,h,z,c:c/(w*h)}}
+function match(tp,fe,x0,y0,R){
+ const g=fe.g,W=fe.w,H=fe.h,tw=tp.w,th=tp.h,sk=tw*th>1500?2:1,z=tp.z;let best=1e9,bx=x0,by=y0;
+ const test=(px,py)=>{if(px<0||py<0||px+tw>W||py+th>H)return;let s=0,n=0;
+  for(let j=0;j<th;j+=sk){const o=(py+j)*W+px;for(let i=0;i<tw;i+=sk){s+=g[o+i];n++}}
+  const m=s/n;let d=0;
+  for(let j=0;j<th;j+=sk){const o=(py+j)*W+px,q=j*tw;for(let i=0;i<tw;i+=sk)d+=Math.abs(g[o+i]-m-z[q+i])}
+  d/=n;if(d<best){best=d;bx=px;by=py}};
+ for(let dy=-R;dy<=R;dy+=2)for(let dx=-R;dx<=R;dx+=2)test(x0+dx,y0+dy);
+ const cx=bx,cy=by;for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)test(cx+dx,cy+dy);
+ return{x:bx,y:by,e:best}}
+function step(t,fe){
+ const tp=t.tpl,R=Math.max(14,Math.round(.045*fe.w)),m=match(tp,fe,t.x,t.y,R);
+ if(m.e<.6*tp.c+2){t.x=m.x;t.y=m.y;t.miss=0;
+  if(++t.n%4==0){const nt=tplOf(fe,t.x,t.y,tp.w,tp.h);for(let i=0;i<tp.z.length;i++)tp.z[i]=.8*tp.z[i]+.2*nt.z[i];let c=0;for(let i=0;i<tp.z.length;i++)c+=Math.abs(tp.z[i]);tp.c=c/tp.z.length}}
+ else if(++t.miss>15)t.vis=0}
+function replay(t,fe0){for(const e of TR.buf)if(e.t>fe0.t&&t.vis)step(t,e)}
+ 
+/* ---------- tracks ---------- */
+function mk(f,fe){
+ const ds=fe.ds;let x=Math.round(f.b[0]*ds),y=Math.round(f.b[1]*ds),w=Math.max(12,Math.round((f.b[2]-f.b[0])*ds)),h=Math.max(6,Math.round((f.b[3]-f.b[1])*ds));
+ w=Math.min(w,fe.w-2);h=Math.min(h,fe.h-2);x=clamp(x,0,fe.w-w);y=clamp(y,0,fe.h-h);
+ return{k:{},v:{},p:null,cf:0,x,y,w,h,tpl:tplOf(fe,x,y,w,h),vis:1,miss:0,n:0,last:Date.now()}}
+const iou=(a,b)=>{const x0=Math.max(a.x,b.x),y0=Math.max(a.y,b.y),x1=Math.min(a.x+a.w,b.x+b.w),y1=Math.min(a.y+a.h,b.y+b.h),i=Math.max(0,x1-x0)*Math.max(0,y1-y0);return i/(a.w*a.h+b.w*b.h-i||1)};
+function vote(t,f){t.k[f.p]=(t.k[f.p]||0)+1;t.v[f.p]=(t.v[f.p]||0)+f.conf;t.last=Date.now()}
+function confirm(t,f){
  const best=Object.keys(t.k).sort((a,b)=>t.v[b]-t.v[a])[0];
- if(f.p==best)t.b=f.b;                           /* box follows the winning reading */
- if(t.k[best]>=2||f.conf>=80){
-  t.p=best;t.cf=Math.min(99.5,t.v[best]/t.k[best]).toFixed(1);if(!t.b)t.b=f.b;
-  if(!RD.found.has(best)){RD.found.add(best);const d=mkPl(0);d.p=best;d.cf=t.cf;d.cam='CAM-021';PL.unshift(d);CURP=d;veh++;
+ if(t.k[best]>=2||f.conf>=80){t.p=best;t.cf=Math.min(99.5,t.v[best]/t.k[best]).toFixed(1);
+  if(!RD.found.has(best)&&!t.logged){t.logged=1;RD.found.add(best);const d=mkPl(0);d.p=best;d.cf=t.cf;d.cam='CAM-021';PL.unshift(d);CURP=d;veh++;
    if(d.s=='Flagged')notify('b','Vehicle flagged',best+' flagged on CAM-021');pl()}}}
-
+function ingest(f,fe){
+ const tmp=mk(f,fe);replay(tmp,fe);if(!tmp.vis)return;       /* move the new reading forward to the current frame */
+ const t=RD.tracks.find(o=>Object.keys(o.k).some(k=>sim(k,f.p))||(o.vis&&iou(o,tmp)>.3));
+ if(t){vote(t,f);
+  const near=Object.keys(t.k).some(k=>sim(k,f.p));
+  if(!t.vis||(near&&iou(t,tmp)<.2)){t.x=tmp.x;t.y=tmp.y;t.w=tmp.w;t.h=tmp.h;t.tpl=tmp.tpl;t.vis=1;t.miss=0}
+  confirm(t,f)}
+ else{vote(tmp,f);RD.tracks.push(tmp);confirm(tmp,f)}}
+ 
 async function loop(){
  if(RD.busy||!RD.on||cur!='anpr'||!vid||vid.readyState<2||!vid.videoWidth)return;
  RD.busy=1;
- try{const w=await worker(),vw=vid.videoWidth,vh=vid.videoHeight,rg=regions(vw,vh),[rx,ry,rw,rh]=rg[RD.pass++%rg.length],
-   sc=Math.min(3,1600/rw),cv=RD.cv||(RD.cv=document.createElement('canvas')),x=cv.getContext('2d');
+ try{const w=await worker();if(!vid||!vid.videoWidth){RD.busy=0;return}
+  const vw=vid.videoWidth,vh=vid.videoHeight,seek=RD.seek,fe=grab(vid);pushBuf(fe);
+  const idx=RD.pass++,vis=RD.tracks.filter(t=>t.vis&&t.p);let reg=[0,0,vw,vh];
+  if(idx%3==2&&vis.length){const t=vis[(idx/3|0)%vis.length],ds=fe.ds,ww=Math.min(vw,Math.max(t.w/ds*3,vw*.18)),hh=Math.min(vh,ww*.6);
+   reg=[clamp((t.x+t.w/2)/ds-ww/2,0,vw-ww),clamp((t.y+t.h/2)/ds-hh/2,0,vh-hh),ww,hh]}
+  else if(idx%2==1){reg=regions(vw,vh)[1+((idx>>1)%4)]}
+  const[rx,ry,rw,rh]=reg,sc=Math.min(4,1600/rw),cv=RD.cv||(RD.cv=document.createElement('canvas')),x=cv.getContext('2d');
   cv.width=Math.round(rw*sc);cv.height=Math.round(rh*sc);
-  x.filter='grayscale(1) contrast(1.6)';x.drawImage(vid,rx,ry,rw,rh,0,0,cv.width,cv.height);
+  x.filter='grayscale(1) contrast(1.6)';x.drawImage(vid,rx,ry,rw,rh,0,0,cv.width,cv.height);   /* same frame as fe */
   const{data}=await w.recognize(cv);
-  candidates(wordsOf(data)).forEach(f=>{f.b=[f.b[0]/sc+rx,f.b[1]/sc+ry,f.b[2]/sc+rx,f.b[3]/sc+ry];feed(f)});
+  if(seek==RD.seek)candidates(wordsOf(data)).forEach(f=>{f.b=[f.b[0]/sc+rx,f.b[1]/sc+ry,f.b[2]/sc+rx,f.b[3]/sc+ry];ingest(f,fe)});
  }catch(e){}
- RD.tracks=RD.tracks.filter(t=>Date.now()-t.last<7000);RD.busy=0}
-setInterval(loop,200);
-
-/* overlay: GREEN box exactly on the plate; coordinates are in video pixels mapped through the letterboxed video,
-   so it stays aligned in normal view and fullscreen */
+ RD.tracks=RD.tracks.filter(t=>t.vis||Date.now()-t.last<8000);RD.busy=0}
+setInterval(loop,150);
+ 
+/* ---------- per-video-frame driver: keeps the box glued to the plate ---------- */
+function drive(gen,v){
+ const tick=()=>{if(gen!=RD.gen||v!==vid||cur!='anpr')return;
+  if(v.videoWidth&&v.readyState>=2&&(v.requestVideoFrameCallback||v.currentTime!=RD.lt)){
+   RD.lt=v.currentTime;const fe=grab(v);pushBuf(fe);RD.tracks.forEach(t=>{if(t.vis)step(t,fe)})}
+  sched()},
+ sched=()=>v.requestVideoFrameCallback?v.requestVideoFrameCallback(tick):requestAnimationFrame(tick);
+ sched()}
+ 
+/* ---------- overlay: GREEN box on the plate, number in the label ---------- */
 window.ov=function(){
  const cv=$('#ov');if(!cv||cur!='anpr')return;
  const d=devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;if(cv.width!=W*d)cv.width=W*d;if(cv.height!=H*d)cv.height=H*d;
  const x=cv.getContext('2d');x.setTransform(d,0,0,d,0,0);x.clearRect(0,0,W,H);
- if(vid&&vid.videoWidth){const s=Math.min(W/vid.videoWidth,H/vid.videoHeight),ox=(W-vid.videoWidth*s)/2,oy=(H-vid.videoHeight*s)/2;
-  RD.tracks.forEach(t=>{if(!t.p||Date.now()-t.last>5000)return;
-   const pad=3,bx=ox+t.b[0]*s-pad,by=oy+t.b[1]*s-pad,bw=(t.b[2]-t.b[0])*s+2*pad,bh=(t.b[3]-t.b[1])*s+2*pad;
+ if(vid&&vid.videoWidth){const s=Math.min(W/vid.videoWidth,H/vid.videoHeight),ox=(W-vid.videoWidth*s)/2,oy=(H-vid.videoHeight*s)/2,ds=Math.min(1,640/vid.videoWidth);
+  RD.tracks.forEach(t=>{if(!t.p||!t.vis)return;
+   const pad=3,bx=ox+t.x/ds*s-pad,by=oy+t.y/ds*s-pad,bw=t.w/ds*s+2*pad,bh=t.h/ds*s+2*pad;
    x.strokeStyle=GREEN;x.lineWidth=3;x.strokeRect(bx,by,bw,bh);
-   const tx=t.p+'  '+t.cf+'%';x.font='700 13px Manrope,sans-serif';const tw=x.measureText(tx).width+12;
-   x.fillStyle=GREEN;x.fillRect(bx,by-22,tw,22);x.fillStyle='#052e16';x.fillText(tx,bx+6,by-7)})}
+   const tx=t.p+'  '+t.cf+'%';x.font='700 13px Manrope,sans-serif';const tw=x.measureText(tx).width+12,ly=by>26?by-22:by+bh;
+   x.fillStyle=GREEN;x.fillRect(bx,ly,tw,22);x.fillStyle='#052e16';x.fillText(tx,bx+6,ly+15)})}
  requestAnimationFrame(window.ov)};
 window.lv=function(){const l=$('#live');if(l){l.className='ch '+(RD.on?'Cleared':'st');l.textContent=RD.on?'\u25CF Live':'Idle'}};
-
-/* hook into the ANPR page: replaces the old random simulator's play handlers */
+ 
+/* ---------- hook into the ANPR page ---------- */
 const oI=I.anpr;
-I.anpr=()=>{oI();RD.tracks=[];RD.pass=0;
+I.anpr=()=>{oI();RD.tracks=[];RD.pass=0;TR.buf=[];RD.gen++;
  const st=$('#stg'),p=document.querySelector('#v .card p.mut');
- if(p)p.textContent='Plates are read from the real video frames with OCR and validated against the Indian format (state code + 2 digits + series + 4 digits). Pause on a clear frame for best accuracy.';
+ if(p)p.textContent='Plates are read from the real video with OCR, validated against the Indian format, then tracked frame-by-frame so the green box stays on the plate. Clear, well-lit video gives the best accuracy.';
  if(!vid||!vidSrc)return;
  vid.setAttribute('controlsList','nofullscreen');vid.disablePictureInPicture=true;
- vid.onplay=()=>{RD.on=1;window.lv();worker()};vid.onpause=()=>{RD.on=1;window.lv()};   /* keep scanning when paused too */
+ vid.onplay=()=>{RD.on=1;window.lv();worker()};vid.onpause=()=>{RD.on=1;window.lv()};
+ vid.addEventListener('seeking',()=>{RD.seek++;RD.tracks=[];TR.buf=[]});      /* jump / loop restart: re-acquire */
  const b=document.createElement('button');b.id='fsb';b.textContent='\u26F6 Fullscreen';
  b.onclick=e=>{e.stopPropagation();document.fullscreenElement?document.exitFullscreen():st.requestFullscreen()};
- st.append(b);st.ondblclick=()=>b.click()};
+ st.append(b);st.ondblclick=()=>b.click();
+ drive(RD.gen,vid)};
 })();
 </script>
