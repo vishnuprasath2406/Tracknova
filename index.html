@@ -656,7 +656,11 @@ const lo=$('#lo');if(lo)lo.style.display='none';
 if(!ME)authUI();else go(cur||'dash');
 })();
 </script></body></html>
-<!-- ===== TrackNova ANPR patch: paste this whole block just before </body> (after the last </script>) ===== -->
+<!-- ===== TrackNova ANPR patch v2 =====
+ 1. DELETE the earlier "TrackNova ANPR patch" block (Tesseract script + style + script).
+ 2. Paste this whole file INSIDE <body>, just before the final </body>.
+ What it does: reads the real plate from your uploaded video (OCR), draws a GREEN box
+ exactly around that plate, and writes the plate number in the label. No random/simulated plates. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
 <style>
 .stage:fullscreen{aspect-ratio:auto;width:100vw;height:100vh;border-radius:0;background:#000}
@@ -664,11 +668,13 @@ if(!ME)authUI();else go(cur||'dash');
 </style>
 <script>
 (()=>{
-const RD={on:0,w:null,busy:0,tracks:[],found:new Set()};
-const ST=new Set('AN AP AR AS BR CG CH DD DL DN GA GJ HP HR JH JK KA KL LA LD MH ML MN MP MZ NL OD OR PB PY RJ SK TN TR TS UK UP WB'.split(' '));
+const GREEN='#22c55e';
+const RD={on:0,w:null,busy:0,tracks:[],found:new Set(),pass:0};
+const STATES=new Set('AN AP AR AS BR CG CH DD DL DN GA GJ HP HR JH JK KA KL LA LD MH ML MN MP MZ NL OD OR PB PY RJ SK TN TR TS UK UP WB'.split(' '));
 const L2D={O:'0',Q:'0',D:'0',I:'1',L:'1',Z:'2',S:'5',B:'8',G:'6'},D2L={'0':'O','1':'I','2':'Z','5':'S','8':'B','6':'G'};
 
-/* Indian plate rule: 2 letters (state) + 2 digits + 1-3 letters + 4 digits. Fixes O/0, I/1, S/5, B/8 by position. */
+/* Indian plate = 2 letters + 2 digits + 1-3 letters + 4 digits (e.g. TN09CL7878).
+   Letter/digit confusions (O/0, I/1, S/5, B/8...) are corrected by position. */
 function fix(raw){
  const s=raw.toUpperCase().replace(/[^A-Z0-9]/g,'');let best=null;
  for(let a=0;a+9<=s.length;a++)for(let n=9;n<=11&&a+n<=s.length;n++){
@@ -677,7 +683,7 @@ function fix(raw){
    if(d){if(/[A-Z]/.test(ch)){if(L2D[ch]){ch=L2D[ch];c++}else{ok=0;break}}}
    else if(/\d/.test(ch)){if(D2L[ch]){ch=D2L[ch];c++}else{ok=0;break}}
    o+=ch}
-  if(ok&&ST.has(o.slice(0,2))&&(!best||c<best.c))best={p:o,c}}
+  if(ok&&STATES.has(o.slice(0,2))&&(!best||c<best.c))best={p:o,c}}
  return best}
 
 async function worker(){
@@ -687,65 +693,76 @@ async function worker(){
  await w.setParameters({tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',tessedit_pageseg_mode:'11'});
  return RD.w=w}
 
-/* words -> candidate plates: chain neighbouring words on the same line ("TN09" "CL" "7878") */
+const wordsOf=d=>{if(d.words&&d.words.length)return d.words;const o=[];(d.blocks||[]).forEach(b=>b.paragraphs.forEach(p=>p.lines.forEach(l=>l.words.forEach(w=>o.push(w)))));return o};
+
+/* join neighbouring words on one line ("TN09" "CL" "7878") and test each chain as a plate */
 function candidates(ws){
- ws=ws.filter(w=>w.text&&w.text.trim()&&w.confidence>25).map(w=>({t:w.text,c:w.confidence,...w.bbox}));
- const out=[];
- ws.forEach(a=>{let ch=[a],last=a;out.push(ch.slice());
+ ws=ws.filter(w=>w.text&&w.text.trim()&&w.confidence>20).map(w=>({t:w.text,c:w.confidence,...w.bbox}));
+ const chains=[];
+ ws.forEach(a=>{let ch=[a],last=a;chains.push(ch.slice());
   for(let k=0;k<3;k++){const h=last.y1-last.y0,cy=(last.y0+last.y1)/2;
    const nx=ws.filter(b=>!ch.includes(b)&&b.x0>=last.x0&&Math.abs((b.y0+b.y1)/2-cy)<.6*h&&b.x0-last.x1<1.6*h).sort((p,q)=>p.x0-q.x0)[0];
-   if(!nx)break;ch.push(nx);last=nx;out.push(ch.slice())}});
+   if(!nx)break;ch.push(nx);last=nx;chains.push(ch.slice())}});
  const res=[];
- out.forEach(ch=>{const f=fix(ch.map(w=>w.t).join(''));if(!f)return;
+ chains.forEach(ch=>{const f=fix(ch.map(w=>w.t).join(''));if(!f)return;
   const b=[Math.min(...ch.map(w=>w.x0)),Math.min(...ch.map(w=>w.y0)),Math.max(...ch.map(w=>w.x1)),Math.max(...ch.map(w=>w.y1))],r=(b[2]-b[0])/(b[3]-b[1]);
-  if(r<1.8||r>9)return;               /* must look like a plate, not a random word */
-  const conf=ch.reduce((s,w)=>s+w.c,0)/ch.length-6*f.c;
-  if(conf>=50)res.push({p:f.p,conf:Math.min(99.5,conf),b})});
+  if(r<1.8||r>9)return;                       /* must be plate-shaped */
+  const conf=ch.reduce((s,w)=>s+w.c,0)/ch.length-5*f.c;
+  if(conf>=55)res.push({p:f.p,conf:Math.min(99.5,conf),b})});
  return res}
 
-/* tracks: vote per plate over several frames, show only when confirmed */
+/* scan regions: whole frame first, then 4 overlapping zoomed tiles (finds small plates) */
+function regions(vw,vh){const r=[[0,0,vw,vh]],tw=vw*.58,th=vh*.58;[0,vh-th].forEach(y=>[0,vw-tw].forEach(x=>r.push([x,y,tw,th])));return r}
+
+/* tracks: a plate is shown only after it is seen twice (or once with high confidence) */
 function feed(f){
- const now=Date.now(),cx=(f.b[0]+f.b[2])/2,cy=(f.b[1]+f.b[3])/2,lim=.07*vid.videoWidth;
+ const now=Date.now(),cx=(f.b[0]+f.b[2])/2,cy=(f.b[1]+f.b[3])/2,lim=.08*vid.videoWidth;
  let t=RD.tracks.find(t=>t.k[f.p]||Math.hypot(t.cx-cx,t.cy-cy)<lim);
  if(!t)RD.tracks.push(t={k:{},v:{},p:null});
- t.k[f.p]=(t.k[f.p]||0)+1;t.v[f.p]=(t.v[f.p]||0)+f.conf;t.cx=cx;t.cy=cy;t.b=f.b;t.last=now;
+ t.k[f.p]=(t.k[f.p]||0)+1;t.v[f.p]=(t.v[f.p]||0)+f.conf;t.cx=cx;t.cy=cy;t.last=now;
  const best=Object.keys(t.k).sort((a,b)=>t.v[b]-t.v[a])[0];
- if(t.k[best]>=2||f.conf>=85){t.p=best;t.cf=Math.min(99.5,t.v[best]/t.k[best]).toFixed(1);
-  if(!RD.found.has(best)){RD.found.add(best);const d=mkPl(0);d.p=best;d.cf=t.cf;d.cam='CAM-021';PL.unshift(d);CURP=d;veh++;if(d.s=='Flagged')notify('b','Vehicle flagged',best+' flagged on CAM-021');pl()}}}
+ if(f.p==best)t.b=f.b;                           /* box follows the winning reading */
+ if(t.k[best]>=2||f.conf>=80){
+  t.p=best;t.cf=Math.min(99.5,t.v[best]/t.k[best]).toFixed(1);if(!t.b)t.b=f.b;
+  if(!RD.found.has(best)){RD.found.add(best);const d=mkPl(0);d.p=best;d.cf=t.cf;d.cam='CAM-021';PL.unshift(d);CURP=d;veh++;
+   if(d.s=='Flagged')notify('b','Vehicle flagged',best+' flagged on CAM-021');pl()}}}
 
 async function loop(){
  if(RD.busy||!RD.on||cur!='anpr'||!vid||vid.readyState<2||!vid.videoWidth)return;
  RD.busy=1;
- try{const w=await worker(),sc=Math.min(2,2000/vid.videoWidth),cv=RD.cv||(RD.cv=document.createElement('canvas')),x=cv.getContext('2d');
-  cv.width=vid.videoWidth*sc;cv.height=vid.videoHeight*sc;x.filter='grayscale(1) contrast(1.5)';x.drawImage(vid,0,0,cv.width,cv.height);
+ try{const w=await worker(),vw=vid.videoWidth,vh=vid.videoHeight,rg=regions(vw,vh),[rx,ry,rw,rh]=rg[RD.pass++%rg.length],
+   sc=Math.min(3,1600/rw),cv=RD.cv||(RD.cv=document.createElement('canvas')),x=cv.getContext('2d');
+  cv.width=Math.round(rw*sc);cv.height=Math.round(rh*sc);
+  x.filter='grayscale(1) contrast(1.6)';x.drawImage(vid,rx,ry,rw,rh,0,0,cv.width,cv.height);
   const{data}=await w.recognize(cv);
-  candidates(data.words||[]).forEach(f=>{f.b=f.b.map(v=>v/sc);feed(f)});
+  candidates(wordsOf(data)).forEach(f=>{f.b=[f.b[0]/sc+rx,f.b[1]/sc+ry,f.b[2]/sc+rx,f.b[3]/sc+ry];feed(f)});
  }catch(e){}
- RD.tracks=RD.tracks.filter(t=>Date.now()-t.last<4000);RD.busy=0}
-setInterval(loop,300);
+ RD.tracks=RD.tracks.filter(t=>Date.now()-t.last<7000);RD.busy=0}
+setInterval(loop,200);
 
-/* overlay: boxes are in video pixels, mapped through the letterboxed video rect, so it stays aligned in normal AND fullscreen */
+/* overlay: GREEN box exactly on the plate; coordinates are in video pixels mapped through the letterboxed video,
+   so it stays aligned in normal view and fullscreen */
 window.ov=function(){
  const cv=$('#ov');if(!cv||cur!='anpr')return;
  const d=devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;if(cv.width!=W*d)cv.width=W*d;if(cv.height!=H*d)cv.height=H*d;
  const x=cv.getContext('2d');x.setTransform(d,0,0,d,0,0);x.clearRect(0,0,W,H);
  if(vid&&vid.videoWidth){const s=Math.min(W/vid.videoWidth,H/vid.videoHeight),ox=(W-vid.videoWidth*s)/2,oy=(H-vid.videoHeight*s)/2;
-  RD.tracks.forEach(t=>{if(!t.p||Date.now()-t.last>2500)return;
-   const pad=4,bx=ox+t.b[0]*s-pad,by=oy+t.b[1]*s-pad,bw=(t.b[2]-t.b[0])*s+2*pad,bh=(t.b[3]-t.b[1])*s+2*pad;
-   x.strokeStyle='#3cf0e0';x.lineWidth=2;x.strokeRect(bx,by,bw,bh);
-   const tx=t.p+' '+t.cf+'%';x.font='700 13px Manrope,sans-serif';const tw=x.measureText(tx).width+10;
-   x.fillStyle='#0b1418';x.fillRect(bx,by-20,tw,20);x.fillStyle='#3cf0e0';x.fillText(tx,bx+5,by-6)})}
+  RD.tracks.forEach(t=>{if(!t.p||Date.now()-t.last>5000)return;
+   const pad=3,bx=ox+t.b[0]*s-pad,by=oy+t.b[1]*s-pad,bw=(t.b[2]-t.b[0])*s+2*pad,bh=(t.b[3]-t.b[1])*s+2*pad;
+   x.strokeStyle=GREEN;x.lineWidth=3;x.strokeRect(bx,by,bw,bh);
+   const tx=t.p+'  '+t.cf+'%';x.font='700 13px Manrope,sans-serif';const tw=x.measureText(tx).width+12;
+   x.fillStyle=GREEN;x.fillRect(bx,by-22,tw,22);x.fillStyle='#052e16';x.fillText(tx,bx+6,by-7)})}
  requestAnimationFrame(window.ov)};
 window.lv=function(){const l=$('#live');if(l){l.className='ch '+(RD.on?'Cleared':'st');l.textContent=RD.on?'\u25CF Live':'Idle'}};
 
-/* hook into the ANPR page: own play state (stops the old random simulator), fullscreen on the whole stage */
+/* hook into the ANPR page: replaces the old random simulator's play handlers */
 const oI=I.anpr;
-I.anpr=()=>{oI();RD.tracks=[];
+I.anpr=()=>{oI();RD.tracks=[];RD.pass=0;
  const st=$('#stg'),p=document.querySelector('#v .card p.mut');
- if(p)p.textContent='Plates are read from the video frames with OCR and checked against the Indian number-plate format (state code + 2 digits + series + 4 digits). Accuracy depends on video quality.';
+ if(p)p.textContent='Plates are read from the real video frames with OCR and validated against the Indian format (state code + 2 digits + series + 4 digits). Pause on a clear frame for best accuracy.';
  if(!vid||!vidSrc)return;
  vid.setAttribute('controlsList','nofullscreen');vid.disablePictureInPicture=true;
- vid.onplay=()=>{RD.on=1;window.lv();worker()};vid.onpause=()=>{RD.on=0;window.lv()};
+ vid.onplay=()=>{RD.on=1;window.lv();worker()};vid.onpause=()=>{RD.on=1;window.lv()};   /* keep scanning when paused too */
  const b=document.createElement('button');b.id='fsb';b.textContent='\u26F6 Fullscreen';
  b.onclick=e=>{e.stopPropagation();document.fullscreenElement?document.exitFullscreen():st.requestFullscreen()};
  st.append(b);st.ondblclick=()=>b.click()};
